@@ -31,7 +31,7 @@ from ppdet.core.workspace import create
 from ppdet.utils.checkpoint import load_weight, load_pretrain_weight, save_model
 import ppdet.utils.stats as stats
 from ppdet.utils import profiler
-from ppdet.modeling.ssod.utils import align_weak_strong_shape
+from ppdet.modeling.ssod.utils import align_weak_strong_shape, picodet_pseudo_gt_from_teacher
 from .trainer import Trainer
 from ppdet.utils.logger import setup_logger
 from paddle.static import InputSpec
@@ -40,7 +40,10 @@ MOT_ARCH = ['JDE', 'FairMOT', 'DeepSORT', 'ByteTrack', 'CenterTrack']
 
 logger = setup_logger('ppdet.engine')
 
-__all__ = ['Trainer_DenseTeacher', 'Trainer_ARSL', 'Trainer_Semi_RTDETR']
+__all__ = [
+    'Trainer_DenseTeacher', 'Trainer_ARSL', 'Trainer_Semi_RTDETR',
+    'Trainer_Semi_PicoDet'
+]
 
 
 class Trainer_DenseTeacher(Trainer):
@@ -1190,3 +1193,373 @@ class Trainer_Semi_RTDETR(Trainer):
     def evaluate(self):
         with paddle.no_grad():
             self._eval_with_loader(self.loader)
+
+
+class Trainer_Semi_PicoDet(Trainer):
+    """
+    Semi-supervised trainer for PicoDet using a teacher-student EMA framework.
+
+    The teacher model is an EMA copy of the student.  On each training step:
+      1. The student is trained with the standard supervised loss on labeled data.
+      2. After ``semi_start_iters`` iterations, the teacher (in eval mode) also
+         runs on weak-augmented unlabeled images to generate pseudo bounding-box
+         labels.  Those pseudo-labels are filtered by score / size and injected
+         as GT into the strong-augmented unlabeled batch.  The student then
+         computes the standard PicoDet supervised loss on that pseudo-labeled
+         batch, weighted by ``unsup_weight``.
+      3. The teacher is updated via EMA from the student after every step.
+
+    Config keys read from ``cfg.SemiTrain``:
+        ema_decay           (float) – EMA decay rate. Default 0.999.
+        sup_weight          (float) – Weight for supervised loss. Default 1.0.
+        unsup_weight        (float) – Weight for unsupervised loss. Default 0.5.
+        unsup_warmup_epochs (int)   – Ramp-up epochs for unsup_weight. Default 5.
+        pseudo_score_thr    (float) – Teacher score threshold. Default 0.4.
+        min_box_size        (int)   – Min box side (px). Default 8.
+        max_pseudo_num      (int)   – Max pseudo boxes per image. Default 20.
+        allowed_target_classes (list|None) – 0-based class IDs to keep.
+        eval_with_teacher   (bool)  – Evaluate teacher at snapshot. Default True.
+
+    Data loading follows the same pattern as ``Trainer_DenseTeacher``:
+        - ``TrainDataset``      – labeled dataset
+        - ``UnsupTrainDataset`` – unlabeled dataset
+        - ``SemiTrainReader``   – interleaved loader yielding
+          (data_sup_w, data_sup_s, data_unsup_w, data_unsup_s) tuples
+    """
+
+    def __init__(self, cfg, mode='train'):
+        self.cfg = cfg
+        assert mode.lower() in ['train', 'eval', 'test'], \
+            "mode should be 'train', 'eval' or 'test'"
+        self.mode = mode.lower()
+        self.optimizer = None
+        self.is_loaded_weights = False
+        self.use_amp = self.cfg.get('amp', False)
+        self.amp_level = self.cfg.get('amp_level', 'O1')
+        self.custom_white_list = self.cfg.get('custom_white_list', None)
+        self.custom_black_list = self.cfg.get('custom_black_list', None)
+
+        # ---- data loader --------------------------------------------------
+        capital_mode = self.mode.capitalize()
+        self.dataset = self.cfg['{}Dataset'.format(capital_mode)] = create(
+            '{}Dataset'.format(capital_mode))()
+
+        if self.mode == 'train':
+            self.dataset_unlabel = self.cfg['UnsupTrainDataset'] = create(
+                'UnsupTrainDataset')
+            self.loader = create('SemiTrainReader')(
+                self.dataset, self.dataset_unlabel, cfg.worker_num)
+
+        # ---- model --------------------------------------------------------
+        if 'model' not in self.cfg:
+            self.model = create(cfg.architecture)
+        else:
+            self.model = self.cfg.model
+            self.is_loaded_weights = True
+
+        # ---- eval / test loader -------------------------------------------
+        if self.mode == 'eval':
+            self._eval_batch_sampler = paddle.io.BatchSampler(
+                self.dataset, batch_size=self.cfg.EvalReader['batch_size'])
+            if cfg.metric == 'VOC':
+                cfg['EvalReader']['collate_batch'] = False
+            self.loader = create('EvalReader')(self.dataset, cfg.worker_num,
+                                               self._eval_batch_sampler)
+
+        # ---- optimizer ----------------------------------------------------
+        if self.mode == 'train':
+            steps_per_epoch = len(self.loader)
+            if steps_per_epoch < 1:
+                logger.warning(
+                    "Samples in dataset are less than batch_size, please set "
+                    "smaller batch_size in SemiTrainReader.")
+            self.lr = create('LearningRate')(steps_per_epoch)
+            self.optimizer = create('OptimizerBuilder')(self.lr, self.model)
+
+        if self.use_amp and self.amp_level == 'O2':
+            self.model, self.optimizer = paddle.amp.decorate(
+                models=self.model,
+                optimizers=self.optimizer,
+                level=self.amp_level)
+
+        # ---- EMA teacher (SimpleModelEMA mirrors DenseTeacher convention) -
+        semi_cfg = self.cfg.get('SemiTrain', {})
+        ema_decay = semi_cfg.get('ema_decay', 0.999)
+        self.ema = SimpleModelEMA(self.model, decay=ema_decay)
+        self.use_ema = True
+        self.ema_start_iters = self.cfg.get('ema_start_iters', 0)
+
+        self._nranks = dist.get_world_size()
+        self._local_rank = dist.get_rank()
+
+        self.status = {}
+        self.start_epoch = 0
+        self.end_epoch = 0 if 'epoch' not in cfg else cfg.epoch
+
+        self._init_callbacks()
+        self._init_metrics()
+        self._reset_metrics()
+
+    # ------------------------------------------------------------------
+    # Weight loading helpers
+    # ------------------------------------------------------------------
+
+    def load_weights(self, weights):
+        """Load pretrained weights into the student; teacher is synced from it."""
+        if self.is_loaded_weights:
+            return
+        self.start_epoch = 0
+        load_pretrain_weight(self.model, weights)
+        # Sync teacher from student immediately after loading
+        self.ema.model.set_state_dict(self.model.state_dict())
+        logger.info(
+            "Load weights {} into student and synced to teacher.".format(
+                weights))
+
+    def resume_weights(self, weights, exchange=True):
+        self.start_epoch = load_weight(self.model, weights, self.optimizer,
+                                       self.ema if self.use_ema else None,
+                                       exchange)
+        logger.debug("Resume weights of epoch {}".format(self.start_epoch))
+
+    # ------------------------------------------------------------------
+    # Training loop
+    # ------------------------------------------------------------------
+
+    def train(self, validate=False):
+        assert self.mode == 'train', "Model not in 'train' mode"
+        Init_mark = False
+
+        semi_cfg = self.cfg.get('SemiTrain', {})
+        sup_weight = semi_cfg.get('sup_weight', 1.0)
+        unsup_weight = semi_cfg.get('unsup_weight', 0.5)
+        unsup_warmup_epochs = semi_cfg.get('unsup_warmup_epochs', 5)
+        eval_with_teacher = semi_cfg.get('eval_with_teacher', True)
+
+        self.semi_start_iters = self.cfg.get('semi_start_iters', 0)
+
+        if validate:
+            self.cfg['EvalDataset'] = self.cfg.EvalDataset = create(
+                "EvalDataset")()
+
+        sync_bn = (getattr(self.cfg, 'norm_type', None) == 'sync_bn' and
+                   self.cfg.use_gpu and self._nranks > 1)
+        if sync_bn:
+            self.model = paddle.nn.SyncBatchNorm.convert_sync_batchnorm(
+                self.model)
+
+        if self.cfg.get('fleet', False):
+            self.model = fleet.distributed_model(self.model)
+            self.optimizer = fleet.distributed_optimizer(self.optimizer)
+        elif self._nranks > 1:
+            find_unused_parameters = self.cfg.get('find_unused_parameters',
+                                                   False)
+            self.model = paddle.DataParallel(
+                self.model, find_unused_parameters=find_unused_parameters)
+
+        # Teacher parameters should not accumulate gradients
+        for param in self.ema.model.parameters():
+            param.stop_gradient = True
+
+        self.status.update({
+            'epoch_id': self.start_epoch,
+            'step_id': 0,
+            'steps_per_epoch': len(self.loader),
+            'exchange_save_model': False,
+        })
+        self.status['batch_time'] = stats.SmoothedValue(
+            self.cfg.log_iter, fmt='{avg:.4f}')
+        self.status['data_time'] = stats.SmoothedValue(
+            self.cfg.log_iter, fmt='{avg:.4f}')
+        self.status['training_staus'] = stats.TrainingStats(self.cfg.log_iter)
+        profiler_options = self.cfg.get('profiler_options', None)
+        self._compose_callback.on_train_begin(self.status)
+
+        steps_per_epoch = len(self.loader)
+        unsup_warmup_iters = unsup_warmup_epochs * steps_per_epoch
+
+        for epoch_id in range(self.start_epoch, self.cfg.epoch):
+            self.status['mode'] = 'train'
+            self.status['epoch_id'] = epoch_id
+            self._compose_callback.on_epoch_begin(self.status)
+            self.loader.dataset_label.set_epoch(epoch_id)
+            self.loader.dataset_unlabel.set_epoch(epoch_id)
+            iter_tic = time.time()
+
+            loss_dict = {
+                'loss': paddle.to_tensor([0.0]),
+                'loss_sup': paddle.to_tensor([0.0]),
+                'loss_unsup': paddle.to_tensor([0.0]),
+            }
+
+            for step_id in range(steps_per_epoch):
+                data = next(self.loader)
+                data_sup_w, data_sup_s, data_unsup_w, data_unsup_s = data
+
+                self.status['data_time'].update(time.time() - iter_tic)
+                self.status['step_id'] = step_id
+                profiler.add_profiler_step(profiler_options)
+                self._compose_callback.on_step_begin(self.status)
+
+                curr_iter = steps_per_epoch * epoch_id + step_id
+
+                # ---- 1. Supervised loss on labeled data ---------------
+                self.model.train()
+                data_sup_w['epoch_id'] = epoch_id
+                loss_dict_sup = self.model(data_sup_w)
+                losses_sup = loss_dict_sup['loss'] * sup_weight
+                losses_sup.backward()
+
+                losses = losses_sup.detach()
+                loss_dict.update(loss_dict_sup)
+                loss_dict['loss_sup'] = losses_sup.detach()
+
+                # ---- 2. Semi-supervised loss on unlabeled data --------
+                if curr_iter >= self.semi_start_iters:
+                    if curr_iter == self.semi_start_iters:
+                        logger.info("***" * 30)
+                        logger.info('Semi starting ...')
+                        logger.info("***" * 30)
+
+                    # Align spatial sizes of weak/strong unlabeled images
+                    # (BatchRandomResize may produce different sizes per batch)
+                    if (data_unsup_w['image'].shape !=
+                            data_unsup_s['image'].shape):
+                        data_unsup_w, data_unsup_s = align_weak_strong_shape(
+                            data_unsup_w, data_unsup_s)
+
+                    # Teacher predicts pseudo-labels on weak-aug images.
+                    # scale_factor = 1 keeps bboxes in input-image coordinates
+                    # (no rescaling to original image size).
+                    self.ema.model.eval()
+                    with paddle.no_grad():
+                        bs = data_unsup_w['image'].shape[0]
+                        data_unsup_w['scale_factor'] = paddle.ones(
+                            [bs, 2], dtype='float32')
+                        teacher_out = self.ema.model(data_unsup_w)
+
+                    # Convert teacher predictions → pseudo-GT batch
+                    data_unsup_s['epoch_id'] = epoch_id
+                    pseudo_batch = picodet_pseudo_gt_from_teacher(
+                        teacher_out, data_unsup_s, semi_cfg)
+
+                    # Linear warm-up for unsupervised loss weight
+                    if unsup_warmup_iters > 0 and curr_iter < (
+                            self.semi_start_iters + unsup_warmup_iters):
+                        ramp = (curr_iter - self.semi_start_iters
+                                ) / unsup_warmup_iters
+                        curr_unsup_weight = unsup_weight * ramp
+                    else:
+                        curr_unsup_weight = unsup_weight
+
+                    # Student trains on strong unlabeled images with pseudo-GT
+                    self.model.train()
+                    loss_dict_unsup = self.model(pseudo_batch)
+                    losses_unsup = loss_dict_unsup['loss'] * curr_unsup_weight
+                    losses_unsup.backward()
+
+                    losses = losses + losses_unsup.detach()
+                    loss_dict['loss_unsup'] = losses_unsup.detach()
+                    loss_dict['loss'] = losses
+
+                self.optimizer.step()
+                curr_lr = self.optimizer.get_lr()
+                self.lr.step()
+                self.optimizer.clear_grad()
+
+                self.status['learning_rate'] = curr_lr
+                if self._nranks < 2 or self._local_rank == 0:
+                    self.status['training_staus'].update(loss_dict)
+                self.status['batch_time'].update(time.time() - iter_tic)
+                self._compose_callback.on_step_end(self.status)
+
+                # EMA update
+                if curr_iter == self.ema_start_iters:
+                    logger.info("***" * 30)
+                    logger.info('EMA starting ...')
+                    logger.info("***" * 30)
+                    self.ema.update(self.model, decay=0)
+                elif curr_iter > self.ema_start_iters:
+                    self.ema.update(self.model)
+
+                iter_tic = time.time()
+
+            is_snapshot = (self._nranks < 2 or self._local_rank == 0) \
+                and ((epoch_id + 1) % self.cfg.snapshot_epoch == 0
+                     or epoch_id == self.end_epoch - 1)
+
+            self._compose_callback.on_epoch_end(self.status)
+
+            if validate and is_snapshot:
+                if not hasattr(self, '_eval_loader'):
+                    self._eval_dataset = self.cfg.EvalDataset
+                    self._eval_batch_sampler = paddle.io.BatchSampler(
+                        self._eval_dataset,
+                        batch_size=self.cfg.EvalReader['batch_size'])
+                    if self.cfg.metric == 'VOC':
+                        self.cfg['EvalReader']['collate_batch'] = False
+                    self._eval_loader = create('EvalReader')(
+                        self._eval_dataset,
+                        self.cfg.worker_num,
+                        batch_sampler=self._eval_batch_sampler)
+
+                if validate and Init_mark == False:
+                    Init_mark = True
+                    self._init_metrics(validate=validate)
+                    self._reset_metrics()
+
+                with paddle.no_grad():
+                    self.status['save_best_model'] = True
+                    self._eval_with_loader(
+                        self._eval_loader,
+                        use_teacher=eval_with_teacher)
+
+        self._compose_callback.on_train_end(self.status)
+
+    # ------------------------------------------------------------------
+    # Evaluation helpers
+    # ------------------------------------------------------------------
+
+    def _eval_with_loader(self, loader, use_teacher=True):
+        sample_num = 0
+        tic = time.time()
+        self._compose_callback.on_epoch_begin(self.status)
+        self.status['mode'] = 'eval'
+
+        if use_teacher:
+            logger.info("***** teacher model evaluating *****")
+            eval_model = self.ema.model
+        else:
+            logger.info("***** student model evaluating *****")
+            eval_model = self.model
+
+        eval_model.eval()
+
+        for step_id, data in enumerate(loader):
+            self.status['step_id'] = step_id
+            self._compose_callback.on_step_begin(self.status)
+            outs = eval_model(data)
+
+            for metric in self._metrics:
+                metric.update(data, outs)
+
+            if isinstance(data, typing.Sequence):
+                sample_num += data[0]['im_id'].numpy().shape[0]
+            else:
+                sample_num += data['im_id'].numpy().shape[0]
+            self._compose_callback.on_step_end(self.status)
+
+        self.status['sample_num'] = sample_num
+        self.status['cost_time'] = time.time() - tic
+
+        for metric in self._metrics:
+            metric.accumulate()
+            metric.log()
+        self._compose_callback.on_epoch_end(self.status)
+        self._reset_metrics()
+
+    def evaluate(self):
+        semi_cfg = self.cfg.get('SemiTrain', {})
+        use_teacher = semi_cfg.get('eval_with_teacher', True)
+        with paddle.no_grad():
+            self._eval_with_loader(self.loader, use_teacher=use_teacher)
