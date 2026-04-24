@@ -1,0 +1,21 @@
+metric: COCO
+num_classes: 2
+
+TrainDataset:
+  name: COCODataSet
+  image_dir: /home/wisson/data/watts/picodet/training/train
+  anno_path: /home/wisson/data/watts/picodet/training/annotations/instance_train.json
+  dataset_dir: /home/wisson/data/watts/picodet/training/
+  data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
+
+EvalDataset:
+  name: COCODataSet
+  image_dir: /home/wisson/data/watts/picodet/training/val
+  anno_path: /home/wisson/data/watts/picodet/training/annotations/instance_val.json
+  dataset_dir: /home/wisson/data/watts/picodet/training/
+  allow_empty: true
+
+TestDataset:
+  name: ImageFolder
+  anno_path: /home/wisson/data/watts/picodet/training/annotations/instance_val.json # also support txt (like VOC's label_list.txt)
+  dataset_dir: /home/wisson/data/watts/picodet/training/ # if set, anno_path will be 'dataset_dir/anno_path'

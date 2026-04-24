@@ -1,0 +1,27 @@
+pretrain_weights: /home/wisson/code/PaddleDetection-2.7.0/tools/runs/maxwell/local/260302/model_final.pdparams
+_BASE_: [
+  'coco_detection_local_refine.yml',
+  'runtime_local_refine.yml',
+  '../_base_/picodet_v2.yml',
+  '../_base_/optimizer_300e.yml',
+  '../_base_/picodet_416_reader.yml',
+]
+
+weights:
+save_dir: runs/maxwell/truck/260331
+find_unused_parameters: True
+use_ema: true
+epoch: 50
+snapshot_epoch: 10
+
+TrainReader:
+  batch_size: 55
+
+LearningRate:
+  base_lr: 1.0e-4
+  schedulers:
+  - name: CosineDecay
+    max_epochs: 50
+  - name: LinearWarmup
+    start_factor: 0.1
+    steps: 80

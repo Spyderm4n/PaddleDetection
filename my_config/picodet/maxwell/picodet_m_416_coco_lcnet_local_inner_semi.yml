@@ -1,0 +1,61 @@
+_BASE_:
+  - ./picodet_m_416_coco_lcnet_local_inner.yml
+
+use_gpu: true
+epoch: 80
+snapshot_epoch: 5
+log_iter: 20
+
+weights: /home/wisson/code/PaddleDetection-2.7.0/tools/runs/maxwell/local/baseline_260417.pdparams
+
+SemiTrain:
+  use_semi: true
+
+  # 这次 target 中允许出现的类别 id（按 0-based 类别索引）
+  #      0        1        2       3       4         5
+  #  [target, charger, contacts, cover, holder, inner_cover]
+  # 你每次训练前根据具体任务修改
+  # 例：只出现 target => [0]
+  # 例：出现 target, contacts, inner_cover => [0, 2, 5]
+  allowed_target_classes: [1, 2]
+
+  # EMA teacher
+  ema_decay: 0.999
+
+  # pseudo label
+  pseudo_score_thr: 0.4
+  min_box_size: 8
+  max_pseudo_num: 20
+
+  # loss
+  unsup_weight: 0.5
+  unsup_warmup_epochs: 5
+
+  # batch size
+  source_batch_size: 8
+  target_labeled_batch_size: 4
+  target_unlabeled_batch_size: 8
+
+  # eval
+  eval_with_teacher: true
+
+SemiDataSet:
+  source_labeled:
+    image_dir: /home/wisson/data/maxwell/local/training_semi/source
+    anno_path: /home/wisson/data/maxwell/local/training_semi/annotations/source_train.json
+
+  source_val:
+    image_dir: /home/wisson/data/maxwell/local/training_semi/source
+    anno_path: /home/wisson/data/maxwell/local/training_semi/annotations/source_val.json
+
+  target_labeled:
+    image_dir: /home/wisson/data/maxwell/local/training_semi/target
+    anno_path: /home/wisson/data/maxwell/local/training_semi/annotations/target_labeled.json
+
+  target_unlabeled:
+    image_dir: /home/wisson/data/maxwell/local/training_semi/target
+    anno_path: /home/wisson/data/maxwell/local/training_semi/annotations/target_unlabeled.json
+
+  target_val:
+    image_dir: /home/wisson/data/maxwell/local/training_semi/target
+    anno_path: /home/wisson/data/maxwell/local/training_semi/annotations/target_val.json

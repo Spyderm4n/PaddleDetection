@@ -1,0 +1,27 @@
+pretrain_weights: /home/wisson/code/PaddleDetection-2.7.0/tools/runs/maxwell/local/lab_holder/model_final.pdparams
+_BASE_: [
+  'coco_detection_label.yml',
+  'runtime_label.yml',
+  '../_base_/picodet_v2.yml',
+  '../_base_/optimizer_300e.yml',
+  '../_base_/picodet_416_reader.yml',
+]
+
+weights:
+save_dir: runs/maxwell/arUco/0627
+find_unused_parameters: True
+use_ema: true
+epoch: 100
+snapshot_epoch: 10
+
+TrainReader:
+  batch_size: 55
+
+LearningRate:
+  base_lr: 0.02
+  schedulers:
+  - name: CosineDecay
+    max_epochs: 300
+  - name: LinearWarmup
+    start_factor: 0.1
+    steps: 200

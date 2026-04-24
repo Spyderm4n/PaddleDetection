@@ -1,0 +1,21 @@
+metric: COCO
+num_classes: 3
+
+TrainDataset:
+  name: COCODataSet
+  image_dir: /home/wisson/data/Kirin_data/local/0424/imgs
+  anno_path: /home/wisson/data/Kirin_data/local/0424/annotations/instance_train.json
+  dataset_dir: /home/wisson/data/Kirin_data/local/0424/
+  data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
+
+EvalDataset:
+  name: COCODataSet
+  image_dir: /home/wisson/data/Kirin_data/local/0424/val
+  anno_path: /home/wisson/data/Kirin_data/local/0424/annotations/instance_val.json
+  dataset_dir: /home/wisson/data/Kirin_data/local/0424/
+  allow_empty: true
+
+TestDataset:
+  name: ImageFolder
+  anno_path: /home/wisson/data/Kirin_data/local/0424/annotations/instance_val.json # also support txt (like VOC's label_list.txt)
+  dataset_dir: /home/wisson/data/Kirin_data/local/0424/ # if set, anno_path will be 'dataset_dir/anno_path'
