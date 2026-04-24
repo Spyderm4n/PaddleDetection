@@ -35,7 +35,7 @@ import paddle
 from ppdet.core.workspace import load_config, merge_config
 
 from ppdet.engine import Trainer, TrainerCot, init_parallel_env, set_random_seed, init_fleet_env
-from ppdet.engine.trainer_ssod import Trainer_DenseTeacher, Trainer_ARSL, Trainer_Semi_RTDETR
+from ppdet.engine.trainer_ssod import Trainer_DenseTeacher, Trainer_ARSL, Trainer_Semi_RTDETR, Trainer_Semi_PicoDet
 
 from ppdet.slim import build_slim_model
 
@@ -139,6 +139,8 @@ def run(FLAGS, cfg):
             trainer = Trainer_ARSL(cfg, mode='train')
         elif ssod_method == 'Semi_RTDETR':
             trainer = Trainer_Semi_RTDETR(cfg, mode='train')
+        elif ssod_method == 'Semi_PicoDet':
+            trainer = Trainer_Semi_PicoDet(cfg, mode='train')
         else:
             raise ValueError(
                 "Semi-Supervised Object Detection only no support this method.")
