@@ -11,7 +11,7 @@ ssod_method: Semi_PicoDet
 
 # Pretrained baseline weights (student initialisation)
 # Set via CLI: -o pretrain_weights=<path>  or  pretrain_weights: <path>
-weights: /home/wisson/code/PaddleDetection-2.7.0/tools/runs/maxwell/local/baseline_260417.pdparams
+weights: /home/wisson/code/PaddleDetection/tools/maxwell/local/baseline_260417.pdparams
 
 # Semi-supervised training hyper-parameters (read by Trainer_Semi_PicoDet)
 SemiTrain:
@@ -45,25 +45,23 @@ SemiTrain:
 # TrainDataset  – labeled images (overrides base config)
 TrainDataset:
   name: COCODataSet
-  image_dir: /home/wisson/data/maxwell/local/training_semi/source
-  anno_path: /home/wisson/data/maxwell/local/training_semi/annotations/source_train.json
-  dataset_dir: /home/wisson/data/maxwell/local/training_semi/
+  dataset_dir: /home/wisson/data/maxwell/local/training_semi
+  image_dir: source
+  anno_path: annotations/train_st.json
   data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
 
-# EvalDataset – validation set used during training snapshots
 EvalDataset:
   name: COCODataSet
-  image_dir: /home/wisson/data/maxwell/local/training_semi/target
-  anno_path: /home/wisson/data/maxwell/local/training_semi/annotations/target_val.json
-  dataset_dir: /home/wisson/data/maxwell/local/training_semi/
+  dataset_dir: /home/wisson/data/maxwell/local/training_semi
+  image_dir: target
+  anno_path: annotations/target_val.json
   allow_empty: true
 
-# UnsupTrainDataset – unlabeled images (annotations are ignored at training time)
 UnsupTrainDataset:
   name: COCODataSet
-  image_dir: /home/wisson/data/maxwell/local/training_semi/target
-  anno_path: /home/wisson/data/maxwell/local/training_semi/annotations/target_unlabeled.json
-  dataset_dir: /home/wisson/data/maxwell/local/training_semi/
+  dataset_dir: /home/wisson/data/maxwell/local/training_semi
+  image_dir: target
+  anno_path: annotations/target_unlabeled.json
   data_fields: ['image']
 
 # ---------------------------------------------------------------------------
@@ -79,9 +77,8 @@ SemiTrainReader:
     - RandomFlip: {prob: 0.5}
     - RandomDistort: {}
   weak_aug: []          # Photometric weak augmentation (none beyond sample)
-  strong_aug:           # Photometric strong augmentation for unlabeled branch
-    - RandomDistort: {brightness_range: 0.5, contrast_range: 0.5,
-                      saturation_range: 0.5, hue_range: 18}
+  strong_aug: []          # Photometric strong augmentation for unlabeled branch
+
   sup_batch_transforms:
     - BatchRandomResize:
         target_size: [352, 384, 416, 448, 480]

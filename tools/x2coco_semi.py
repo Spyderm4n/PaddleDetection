@@ -286,6 +286,18 @@ def copy_partition_images(items, output_dir):
         shutil.copyfile(item['image_path'], osp.join(output_dir, item['file_name']))
 
 
+def get_duplicate_file_names(items):
+    duplicates = []
+    seen = set()
+    for item in items:
+        file_name = item['file_name']
+        if file_name in seen and file_name not in duplicates:
+            duplicates.append(file_name)
+            continue
+        seen.add(file_name)
+    return duplicates
+
+
 def convert_labelme_semi_supervised(args, parser):
     required_args = {
         '--source_image_dir': args.source_image_dir,
@@ -319,6 +331,7 @@ def convert_labelme_semi_supervised(args, parser):
 
     source_train_items, source_val_items = split_train_val(source_items)
     target_train_items, target_val_items = split_train_val(target_labeled_items)
+    train_st_items = source_train_items + target_train_items
 
     label_to_num, categories_list = build_label_map_for_labelme(
         source_items + target_labeled_items)
@@ -327,9 +340,8 @@ def convert_labelme_semi_supervised(args, parser):
     ensure_directory(annotations_dir)
 
     output_datasets = {
-        'source_train.json': source_train_items,
+        'train_st.json': train_st_items,
         'source_val.json': source_val_items,
-        'target_labeled.json': target_train_items,
         'target_val.json': target_val_items,
         'target_unlabeled.json': target_unlabeled_items,
     }
@@ -339,12 +351,19 @@ def convert_labelme_semi_supervised(args, parser):
             build_labelme_coco(items, label_to_num, categories_list))
 
     if args.copy_images:
-        copy_partition_images(source_train_items,
-                              osp.join(args.output_dir, 'source_train'))
+        duplicate_train_names = get_duplicate_file_names(train_st_items)
+        if duplicate_train_names:
+            preview = ', '.join(duplicate_train_names[:5])
+            if len(duplicate_train_names) > 5:
+                preview += ', ...'
+            parser.error(
+                'Cannot copy merged train_st images because duplicate file names exist: {}'
+                .format(preview))
+
+        copy_partition_images(train_st_items,
+                              osp.join(args.output_dir, 'train_st'))
         copy_partition_images(source_val_items,
                               osp.join(args.output_dir, 'source_val'))
-        copy_partition_images(target_train_items,
-                              osp.join(args.output_dir, 'target_labeled'))
         copy_partition_images(target_val_items,
                               osp.join(args.output_dir, 'target_val'))
         copy_partition_images(target_unlabeled_items,
@@ -355,6 +374,7 @@ def convert_labelme_semi_supervised(args, parser):
     print('Target labeled: {} total, {} train, {} val'.format(
         len(target_labeled_items), len(target_train_items),
         len(target_val_items)))
+    print('Merged train_st: {}'.format(len(train_st_items)))
     print('Target unlabeled: {}'.format(len(target_unlabeled_items)))
 
 
