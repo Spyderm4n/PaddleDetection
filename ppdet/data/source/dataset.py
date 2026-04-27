@@ -341,3 +341,24 @@ class EvalDataset(CommonDataset):
 @register
 class TestDataset(CommonDataset):
     pass
+
+
+@register
+class UnsupTrainDataset(CommonDataset):
+    """Unlabeled dataset wrapper for semi-supervised training.
+
+    Mirrors the ``TrainDataset`` / ``EvalDataset`` pattern so that user configs
+    can specify the unlabeled dataset with a ``name`` key and arbitrary dataset
+    kwargs::
+
+        UnsupTrainDataset:
+          name: COCODataSet
+          dataset_dir: /path/to/data
+          image_dir: images
+          anno_path: annotations/unlabeled.json
+
+    The ``!SemiCOCODataSet`` YAML object-notation is also supported (the
+    workspace system will return the pre-instantiated object directly in that
+    case, bypassing this wrapper).
+    """
+    pass

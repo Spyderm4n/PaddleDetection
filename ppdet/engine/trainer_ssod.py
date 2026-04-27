@@ -1245,8 +1245,54 @@ class Trainer_Semi_PicoDet(Trainer):
             '{}Dataset'.format(capital_mode))()
 
         if self.mode == 'train':
-            self.dataset_unlabel = self.cfg['UnsupTrainDataset'] = create(
-                'UnsupTrainDataset')
+            # Build the unlabeled dataset robustly.  Two config formats are
+            # supported:
+            #
+            #   (a) Serialized-object notation (YAML ``!ClassName`` tag):
+            #         UnsupTrainDataset: !SemiCOCODataSet
+            #           dataset_dir: ...
+            #       ``create()`` returns the pre-instantiated object directly.
+            #
+            #   (b) CommonDataset-style dict (name + kwargs):
+            #         UnsupTrainDataset:
+            #           name: COCODataSet
+            #           dataset_dir: ...
+            #           image_dir: ...
+            #           anno_path: ...
+            #       ``create()`` returns a ``UnsupTrainDataset`` wrapper
+            #       (a ``CommonDataset`` subclass); the real dataset lives in
+            #       its ``.dataset`` attribute.
+            #
+            # Save the raw config entry *before* overwriting it so we can
+            # back-fill any path attributes that may have been dropped.
+            _unsup_raw_cfg = self.cfg.get('UnsupTrainDataset', {})
+
+            _ds = create('UnsupTrainDataset')
+            # Unwrap CommonDataset wrapper (case b) to get the actual dataset.
+            if hasattr(_ds, 'dataset'):
+                _ds = _ds.dataset
+            self.dataset_unlabel = _ds
+
+            # Explicitly assign critical path attributes in case they were
+            # not forwarded correctly during construction.
+            # Only applies to the dict-config format (case b); for the
+            # serialized-object format (case a) the raw cfg is already the
+            # dataset object itself, so no back-filling is needed.
+            if isinstance(_unsup_raw_cfg, dict):
+                for _attr in ('dataset_dir', 'image_dir', 'anno_path'):
+                    _raw_val = _unsup_raw_cfg.get(_attr, None)
+                    if _raw_val is not None and not getattr(
+                            self.dataset_unlabel, _attr, None):
+                        setattr(self.dataset_unlabel, _attr, _raw_val)
+
+            # Update cfg so downstream code sees the resolved dataset object.
+            self.cfg['UnsupTrainDataset'] = self.dataset_unlabel
+
+            # Log resolved paths for debugging.
+            for _attr in ('dataset_dir', 'image_dir', 'anno_path'):
+                _val = getattr(self.dataset_unlabel, _attr, None)
+                logger.info("UnsupTrainDataset.{}: {}".format(_attr, _val))
+
             self.loader = create('SemiTrainReader')(
                 self.dataset, self.dataset_unlabel, cfg.worker_num)
 
