@@ -444,7 +444,8 @@ class SemiCOCODataSet(COCODataSet):
             for catid, clsid in self.catid2clsid.items()
         })
 
-        if 'annotations' not in coco.dataset or self.supervised == False:
+        if (not coco.dataset.get('annotations')
+                or self.supervised is False):
             self.load_image_only = True
             logger.warning('Annotation file: {} does not contains ground truth '
                            'and load image information only.'.format(anno_path))

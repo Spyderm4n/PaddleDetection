@@ -58,11 +58,12 @@ EvalDataset:
   allow_empty: true
 
 UnsupTrainDataset:
-  name: COCODataSet
+  name: SemiCOCODataSet
   dataset_dir: /home/wisson/data/maxwell/local/training_semi
   image_dir: target
   anno_path: annotations/target_unlabeled.json
   data_fields: ['image']
+  supervised: false
 
 # ---------------------------------------------------------------------------
 # SemiTrainReader – interleaved labeled + unlabeled loader
