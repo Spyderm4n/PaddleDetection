@@ -1229,16 +1229,16 @@ class Trainer_Semi_PicoDet(Trainer):
 
         # ----------------------------
         # build unlabeled dataset
-        # NOTE:
-        #   Do NOT use create('UnsupTrainDataset') directly,
-        #   because UnsupTrainDataset is a config node, not a registered module.
-        #   Instead, instantiate dataset by its `name`.
         # ----------------------------
         if self.mode == 'train':
-            unsup_cfg = copy.deepcopy(self.cfg['UnsupTrainDataset'])
-            unsup_dataset_name = unsup_cfg['name']
-            unsup_cfg.pop('name')
-            self.dataset_unlabel = create(unsup_dataset_name)(**unsup_cfg)
+            self.dataset_unlabel = self.cfg['UnsupTrainDataset'] = create(
+                'UnsupTrainDataset')()
+            logger.info(
+                "UnsupTrainDataset paths: dataset_dir={}, image_dir={}, "
+                "anno_path={}".format(
+                    getattr(self.dataset_unlabel, 'dataset_dir', 'N/A'),
+                    getattr(self.dataset_unlabel, 'image_dir', 'N/A'),
+                    getattr(self.dataset_unlabel, 'anno_path', 'N/A')))
 
             self.loader = create('SemiTrainReader')(
                 self.dataset, self.dataset_unlabel, cfg.worker_num)
