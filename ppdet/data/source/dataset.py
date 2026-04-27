@@ -341,3 +341,8 @@ class EvalDataset(CommonDataset):
 @register
 class TestDataset(CommonDataset):
     pass
+
+
+@register
+class UnsupTrainDataset(CommonDataset):
+    pass
