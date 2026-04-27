@@ -1351,7 +1351,13 @@ class Trainer_Semi_PicoDet(Trainer):
         self.start_epoch = 0
         load_pretrain_weight(self.model, weights)
         if self.use_ema:
-            load_pretrain_weight(self.ema.model, weights)
+            if hasattr(self.ema, 'model'):
+                load_pretrain_weight(self.ema.model, weights)
+            else:
+                logger.warning(
+                    "EMA object has no 'model' attribute; skipping "
+                    "load_pretrain_weight for EMA. EMA state will be "
+                    "initialized from the model during the first update.")
         logger.info(
             "Load weights {} to start training for PicoDet semi teacher and student".
             format(weights))
