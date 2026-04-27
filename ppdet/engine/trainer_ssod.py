@@ -1316,7 +1316,33 @@ class Trainer_Semi_PicoDet(Trainer):
         self._init_metrics()
         self._reset_metrics()
 
-        self.picodet_train_cfg = cfg.SemiPicoDet['train_cfg']
+        if hasattr(cfg, 'SemiPicoDet') and 'train_cfg' in cfg.SemiPicoDet:
+            self.picodet_train_cfg = cfg.SemiPicoDet['train_cfg']
+            logger.info(
+                "Trainer_Semi_PicoDet: loaded train_cfg from cfg.SemiPicoDet['train_cfg']"
+            )
+        elif hasattr(cfg, 'SemiTrain'):
+            self.picodet_train_cfg = cfg.SemiTrain
+            logger.info(
+                "Trainer_Semi_PicoDet: cfg.SemiPicoDet not found; "
+                "falling back to cfg.SemiTrain as train_cfg"
+            )
+        else:
+            self.picodet_train_cfg = {
+                'sup_weight': 1.0,
+                'unsup_weight': 0.5,
+                'pseudo_score_thr': 0.4,
+                'min_box_size': 8,
+                'max_pseudo_num': 20,
+                'concat_sup_data': True,
+                'suppress': 'linear',
+            }
+            logger.warning(
+                "Trainer_Semi_PicoDet: neither cfg.SemiPicoDet nor cfg.SemiTrain "
+                "found; using built-in default train_cfg. "
+                "Add a 'SemiTrain' or 'SemiPicoDet' block to your config to "
+                "customize these settings."
+            )
         logger.info("Trainer_Semi_PicoDet initialized.")
 
     def load_weights(self, weights):
